@@ -9,8 +9,14 @@
  * half owns every store mutation and this half only renders the outcome.
  */
 
+// The loader keys registration by the package name, so this literal is not
+// decoration: rename the package and every copy of it has to move with it.
+// Declared once and reused below, because the CSS-tag identity is the second
+// place that silently carries the same name.
+const PACKAGE_ID = '@qqiqiq/dsh-session-toolkit';
+
 window.__ModuleLoader__.load({
-  id: '@local/dsh-session-toolkit',
+  id: PACKAGE_ID,
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -128,13 +134,13 @@ window.__ModuleLoader__.load({
       '.dstk-secondary{padding:3px 8px;border:.5px solid var(--dsw-alias-border-l2,#3a3a3a);border-radius:var(--dsw-radius-sm,4px);background:transparent;color:var(--dsw-alias-label-secondary,#aaa);font:inherit;font-size:11px;cursor:pointer}',
       '.dstk-notice{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:122;padding:6px 12px;border-radius:999px;background:var(--dsw-alias-bg-overlay,#1e1e1e);border:.5px solid var(--dsw-alias-border-l2,#3a3a3a);color:var(--dsw-alias-label-primary,#eee);font-family:var(--dsw-font-family,inherit);font-size:12px;line-height:18px}',
     ].join('');
-    const cssId = '@local/dsh-session-toolkit/header-utilities.css';
+    const cssId = PACKAGE_ID + '/header-utilities.css';
     if (
       typeof document !== 'undefined' &&
       document.querySelector('style[data-plugin-css=' + JSON.stringify(cssId) + ']') === null
     ) {
       const tag = document.createElement('style');
-      tag.dataset.plugin = '@local/dsh-session-toolkit';
+      tag.dataset.plugin = PACKAGE_ID;
       tag.dataset.pluginCss = cssId;
       tag.textContent = css;
       document.head.appendChild(tag);

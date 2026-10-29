@@ -1,6 +1,6 @@
 {
   "name": "@qqiqiq/dsh-session-toolkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Two buttons in the conversation header: move a started session into another workspace (with full history), and switch the Agent preset of a session that already began.",
   "type": "module",
   "license": "MIT",
