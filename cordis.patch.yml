@@ -1,0 +1,4 @@
+- insert:
+    - id: session-toolkit
+      name: '@qqiqiq/dsh-session-toolkit'
+      config: {}

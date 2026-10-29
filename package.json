@@ -1,0 +1,51 @@
+{
+  "name": "@qqiqiq/dsh-session-toolkit",
+  "version": "0.1.0",
+  "description": "Two buttons in the conversation header: move a started session into another workspace (with full history), and switch the Agent preset of a session that already began.",
+  "type": "module",
+  "license": "MIT",
+  "author": "QqiqiQ",
+  "homepage": "https://github.com/QqiqiQ/dsh-session-toolkit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QqiqiQ/dsh-session-toolkit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/QqiqiQ/dsh-session-toolkit/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "workspace",
+    "agent-preset"
+  ],
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "icon.png",
+    "README.md",
+    "locale"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

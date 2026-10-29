@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Toolkit",
+    "description": "Two Session-header utilities: move the open Session into another workspace, and switch the Agent preset of any Session, including one that already started."
+  }
+}
