@@ -36,7 +36,10 @@ sessionQuery.readSession
 ```
 
 The new session keeps fork provenance (`parentSession`, `isSeeded`, the `session/end-seed` marker),
-because the harness has no "delete session" and no "change session id".
+because the harness has no "delete session" and no "change session id". It also starts on the model the
+source last used — read from the last `model/selection` event, or, when the picker was never touched,
+from the `config` of the last `request/header` event — because the persona prefix's `{{model}}` variable
+only resolves from the options the Agent was created with.
 
 **`agentPresets.select` only accepts a blank session.** It throws `agent-preset/locked` once the session
 has run a turn. The plugin tries that official path first, and only when it is refused does it rebind the

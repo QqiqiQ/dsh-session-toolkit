@@ -144,19 +144,34 @@ function findWorkspace(workspaces, id) {
  * The model belongs to the Session, not to the preset, so the copy starts on
  * the model the source last used. Unknown fields are dropped on purpose: the
  * Agent only accepts the four documented options.
+ *
+ * A session that never touched the model picker has no `model/selection`
+ * event; there the model lived in the `config` of each `request/header`
+ * event, which is also where the `modelSelection` projection reads
+ * `lastUsed` from, so that is the fallback. Without either the copy is
+ * created without options and `{{model}}` in the persona prefix has no
+ * value, failing the first assembly.
  */
+function optionsFrom(data) {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  const options = {};
+  if (typeof data.provider === 'string') options.provider = data.provider;
+  if (typeof data.model === 'string') options.model = data.model;
+  if (typeof data.reasoningEffort === 'string') options.reasoningEffort = data.reasoningEffort;
+  if (typeof data.maxTokens === 'number') options.maxTokens = data.maxTokens;
+  return options.provider === undefined || options.model === undefined ? undefined : options;
+}
+
 function lastModelOptions(events) {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    if (event.type !== 'model/selection') continue;
-    const data = event.data;
-    if (data === null || typeof data !== 'object' || Array.isArray(data)) return undefined;
-    const options = {};
-    if (typeof data.provider === 'string') options.provider = data.provider;
-    if (typeof data.model === 'string') options.model = data.model;
-    if (typeof data.reasoningEffort === 'string') options.reasoningEffort = data.reasoningEffort;
-    if (typeof data.maxTokens === 'number') options.maxTokens = data.maxTokens;
-    return Object.keys(options).length === 0 ? undefined : options;
+    if (event.type === 'model/selection') {
+      const options = optionsFrom(event.data);
+      if (options !== undefined) return options;
+    } else if (event.type === 'request/header') {
+      const options = optionsFrom(event.data?.header?.config);
+      if (options !== undefined) return options;
+    }
   }
   return undefined;
 }
