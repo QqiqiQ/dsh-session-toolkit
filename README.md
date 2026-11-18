@@ -1,13 +1,14 @@
 # DSH Session Toolkit
 
-Adds two buttons to the DSH conversation header:
+Adds two buttons to the DSH conversation header, plus a retry action on interrupted turns:
 
 | Button | What it does |
 | --- | --- |
 | ⇄ Workspace | Moves the current session into another registered workspace (optionally archiving the original) |
 | ◈ Preset | Switches the Agent preset of the current session — **including sessions that already started** |
+| ↻ Retry | Appears on a turn that ended in error / interrupted / aborted; re-runs the last request **without sending a new message** |
 
-Both are things a browser half cannot do alone, which is why this plugin ships a host half as well.
+All three are things a browser half cannot do alone, which is why this plugin ships a host half as well.
 
 ## Install
 
@@ -46,16 +47,32 @@ has run a turn. The plugin tries that official path first, and only when it is r
 same Agent scope through `agentPresets.recompose(agent.ctx, id)` and write the `agent-preset/selected`
 event that call would have written. History is not rewritten; projections and browser tabs follow.
 
+**A retry is a shoulder tap, not a message.** After a failed or interrupted turn, the model-visible
+surface already ends with the user message that never got an answer — the failed attempt only leaves
+non-surface `assistant/attempt` records. The driver, though, only starts a turn when a wake arrives with
+a message. So the retry route sends an inbox message whose `source.kind` is `runtime-context`: the turn
+opens, the step claims the envelope and deliberately keeps it off the surface (the code path that exists
+for expired runtime-context snapshots), and the request is assembled from the untouched surface — byte
+for byte the request that failed. No "continue" bubble, no log duplication, same session id.
+
+There is also an earlier, synchronous chance: while the failed turn is still open, the plugin listens on
+the `agent/request-error` waterfall downstream of the shipped recoveries (provider retry budget,
+compaction, image offload) and asks through the host's own question card. Answering 重试 returns
+`{ kind: 'retry' }`, which re-runs the same step inside the still-open turn; anything else delegates and
+the ordinary turn error applies. The turn's abort signal guarantees the wait always settles.
+
 ## Channels
 
-The browser half calls two host routes of this package with relative-URL `fetch` (deliberately not
+The browser half calls three host routes of this package with relative-URL `fetch` (deliberately not
 session commands, so nothing lands in the session log as `command/run`):
 
 - `POST /session-toolkit/migrate` — `{ sessionId, workspaceId, archiveSource?, agentPreset? }`
 - `POST /session-toolkit/preset` — `{ sessionId, agentPreset }`
+- `POST /session-toolkit/retry` — `{ sessionId }` → `{ ok, turn, reason }`
 
-Both pass `connection.requestRejection` (login cookie / loopback / same-site checks) first, accept
-`application/json` only, and cap the body at 64 KiB.
+All pass `connection.requestRejection` (login cookie / loopback / same-site checks) first, accept
+`application/json` only, and cap the body at 64 KiB. The retry route answers `session-busy` while a turn
+is open and `nothing-to-retry` unless the last turn ended with `error`, `interrupted` or `aborted`.
 
 ## Known limits
 
@@ -65,6 +82,10 @@ Both pass `connection.requestRejection` (login cookie / loopback / same-site che
   prefix cache is invalidated from the first token. While a turn is running the route answers
   `session-busy`.
 - Switching the preset does not switch the model: model choice belongs to the session, not to the preset.
+- Retry re-runs the failed request, so the output tokens are paid again; the input side stays cached
+  because the surface is byte-identical. A retry after `aborted` likewise replays the last user message.
+- The in-turn question card only appears for failures the automatic retry budget already gave up on, and
+  only where the question channel has an answerer (the GUI); elsewhere the failure behaves as before.
 
 ## License
 

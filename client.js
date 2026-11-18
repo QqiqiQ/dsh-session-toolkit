@@ -1,12 +1,14 @@
 /**
  * Session toolkit — browser half.
  *
- * Two Session-header utilities:
+ * Two Session-header utilities and one turn-tail action:
  *   - move the open Session into another workspace;
- *   - switch the Agent preset of the open Session, started or not.
+ *   - switch the Agent preset of the open Session, started or not;
+ *   - retry a turn that ended in error / interrupted / aborted, re-running
+ *     the last unanswered request without adding a message.
  *
- * Both call the package's own Host routes with a relative fetch, so the Host
- * half owns every store mutation and this half only renders the outcome.
+ * All three call the package's own Host routes with a relative fetch, so the
+ * Host half owns every store mutation and this half only renders the outcome.
  */
 
 // The loader keys registration by the package name, so this literal is not
@@ -23,8 +25,11 @@ window.__ModuleLoader__.load({
 
     const NS = 'session-toolkit';
     const UTILITIES = 'conversation.session.header.utilities';
+    const TURN_TAIL = 'conversation.chat.turnTail';
     const MIGRATE_ROUTE = '/session-toolkit/migrate'.slice(1);
     const PRESET_ROUTE = '/session-toolkit/preset'.slice(1);
+    const RETRY_ROUTE = '/session-toolkit/retry'.slice(1);
+    const RETRYABLE = new Set(['error', 'interrupted', 'aborted']);
 
     //#region dictionaries
     const zh = {
@@ -53,6 +58,11 @@ window.__ModuleLoader__.load({
       'state.pending': '处理中…',
       'notice.workspace': '已迁移到「{title}」',
       'notice.preset': '预设已切换为「{name}」',
+      'retry.trigger': '重试',
+      'retry.title': '重新运行中断的这一轮：原样重放最后的请求，不发送新消息',
+      'retry.reason.error': '因错误中断',
+      'retry.reason.interrupted': '曾被中断',
+      'retry.reason.aborted': '被手动停止',
       'error.fallback': '操作失败：{message}',
       'error.no-remote': '浏览器无法访问 Host 的预设接口',
       'error.load-roster': '预设列表加载失败',
@@ -66,6 +76,7 @@ window.__ModuleLoader__.load({
       'error/agent-preset/locked': '这个会话已经开始，无法按默认方式切换',
       'error/unsupported-media-type': '请求格式不被接受',
       'error/invalid-request': '请求缺少必要参数',
+      'error/nothing-to-retry': '最后一轮不是可重试的中断状态',
     };
     const en = {
       'trigger.workspace': 'Workspace',
@@ -93,6 +104,11 @@ window.__ModuleLoader__.load({
       'state.pending': 'Working…',
       'notice.workspace': 'Moved to “{title}”',
       'notice.preset': 'Preset switched to “{name}”',
+      'retry.trigger': 'Retry',
+      'retry.title': 'Re-run the interrupted turn: replays the last request without sending a new message',
+      'retry.reason.error': 'ended in error',
+      'retry.reason.interrupted': 'was interrupted',
+      'retry.reason.aborted': 'was stopped',
       'error.fallback': 'Failed: {message}',
       'error.no-remote': 'The browser cannot reach the Host preset API',
       'error.load-roster': 'Could not load the preset roster',
@@ -106,6 +122,7 @@ window.__ModuleLoader__.load({
       'error/agent-preset/locked': 'This Session already started; the default switch is refused',
       'error/unsupported-media-type': 'The request format was rejected',
       'error/invalid-request': 'The request is missing a required argument',
+      'error/nothing-to-retry': 'The last turn is not in a retryable interrupted state',
     };
     //#endregion
 
@@ -133,6 +150,8 @@ window.__ModuleLoader__.load({
       '.dstk-footer{display:flex;justify-content:flex-end;margin-top:8px}',
       '.dstk-secondary{padding:3px 8px;border:.5px solid var(--dsw-alias-border-l2,#3a3a3a);border-radius:var(--dsw-radius-sm,4px);background:transparent;color:var(--dsw-alias-label-secondary,#aaa);font:inherit;font-size:11px;cursor:pointer}',
       '.dstk-notice{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:122;padding:6px 12px;border-radius:999px;background:var(--dsw-alias-bg-overlay,#1e1e1e);border:.5px solid var(--dsw-alias-border-l2,#3a3a3a);color:var(--dsw-alias-label-primary,#eee);font-family:var(--dsw-font-family,inherit);font-size:12px;line-height:18px}',
+      '.dstk-retry{display:inline-flex;align-items:center;gap:8px;margin:4px 0}',
+      '.dstk-retry .dstk-error{margin-top:0}',
     ].join('');
     const cssId = PACKAGE_ID + '/header-utilities.css';
     if (
@@ -526,7 +545,85 @@ window.__ModuleLoader__.load({
         );
       }
 
-      return { WorkspaceAction, PresetAction };
+      /**
+       * Retry a turn whose request failed, was interrupted, or was stopped by
+       * mistake. The button renders in the turn tail of the last ended turn
+       * only, and only while the Session is idle; the Host re-checks both
+       * conditions before it sends the zero-content wake.
+       *
+       * `props.turn` is the owner-provided TurnLocation; its `end` event
+       * carries the reason kind, so the visibility decision needs no event
+       * scan. "Last ended turn" is decided against the chat timeline because
+       * an older failed turn must not offer a retry once a newer turn exists.
+       */
+      function RetryAction(props) {
+        const sessionId = props.sessionId;
+        const end = props.turn === undefined || props.turn === null ? undefined : props.turn.end;
+        const kind =
+          end !== undefined && end.data !== undefined && end.data.reason !== undefined
+            ? end.data.reason.kind
+            : undefined;
+        const running = props.useSession((state) => state.running === true);
+        const useChat = typeof props.useChat === 'function' ? props.useChat : null;
+        const lastEndSeq =
+          useChat === null
+            ? -1
+            : useChat((snapshot) => {
+                const turns =
+                  snapshot === null || snapshot === undefined || snapshot.timeline === undefined
+                    ? undefined
+                    : snapshot.timeline.turns;
+                if (turns === undefined || turns === null) return -1;
+                let last = -1;
+                for (const record of turns.values()) {
+                  const seq = record === null || record === undefined || record.end === undefined ? undefined : record.end.seq;
+                  if (typeof seq === 'number' && seq > last) last = seq;
+                }
+                return last;
+              });
+        const [pending, setPending] = React.useState(false);
+        const [error, setError] = React.useState(null);
+
+        if (typeof kind !== 'string' || !RETRYABLE.has(kind)) return null;
+        if (running) return null;
+        if (end === undefined || end.seq !== lastEndSeq) return null;
+
+        const retry = async () => {
+          if (pending) return;
+          setPending(true);
+          setError(null);
+          try {
+            await requestJson(RETRY_ROUTE, { sessionId });
+          } catch (reason) {
+            setError(describeError(reason, t));
+          } finally {
+            setPending(false);
+          }
+        };
+
+        const reasonKey = 'retry.reason.' + String(kind);
+        const reason = t(reasonKey);
+        return h(
+          'span',
+          { className: 'dstk-retry' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dstk-trigger',
+              disabled: pending,
+              title: t('retry.title'),
+              onClick: retry,
+            },
+            h('span', { className: 'dstk-glyph', 'aria-hidden': 'true' }, '↻'),
+            h('span', null, pending ? t('state.pending') : t('retry.trigger')),
+          ),
+          reason === reasonKey ? null : h('span', { className: 'dstk-option-path' }, reason),
+          error === null ? null : h('span', { className: 'dstk-error', role: 'alert' }, error),
+        );
+      }
+
+      return { WorkspaceAction, PresetAction, RetryAction };
     }
     //#endregion
 
@@ -541,6 +638,9 @@ window.__ModuleLoader__.load({
       );
       ctx.slots.inject(UTILITIES, () =>
         ctx.slots.register({ name: UTILITIES, id: 'session-preset-switch', order: 21, locale: NS }, actions.PresetAction),
+      );
+      ctx.slots.inject(TURN_TAIL, () =>
+        ctx.slots.register({ name: TURN_TAIL, id: 'session-turn-retry', order: 10, locale: NS }, actions.RetryAction),
       );
     }
 

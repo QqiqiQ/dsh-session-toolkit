@@ -1,16 +1,24 @@
 /**
- * Session toolkit: move a Session into another workspace, and switch the Agent
- * preset of a Session that has already started.
+ * Session toolkit: move a Session into another workspace, switch the Agent
+ * preset of a Session that has already started, and retry a turn whose model
+ * request failed or was interrupted.
  *
- * Both operations need the Host plane:
+ * The operations need the Host plane:
  * - a workspace membership is derived from the Session header's `cwd`, and the
  *   header is immutable, so "moving" a Session means opening a seeded
  *   continuation of it at the target directory (the same mechanism the shipped
  *   fork uses) and archiving the source;
  * - `agentPresets.select` refuses a Session that already started its first
- *   turn, while the underlying `recompose` has no such gate.
+ *   turn, while the underlying `recompose` has no such gate;
+ * - the driver has no empty-wake primitive, so "retry" sends an inbox message
+ *   whose `runtime-context` source kind keeps it off the model-visible
+ *   surface: the turn opens, the step claims and drops the envelope, and the
+ *   request is assembled from the untouched surface, which already ends with
+ *   the unanswered user message. A second path catches live request failures
+ *   in the `agent/request-error` waterfall and asks the user, re-running the
+ *   same step in place when they pick retry.
  *
- * The browser half reaches these through two small POST routes instead of a
+ * The browser half reaches these through small POST routes instead of a
  * Session command, so nothing is written into the transcript.
  */
 
@@ -18,7 +26,13 @@ import { randomUUID } from 'node:crypto';
 
 const MIGRATE_PATH = '/session-toolkit/migrate';
 const PRESET_PATH = '/session-toolkit/preset';
+const RETRY_PATH = '/session-toolkit/retry';
 const MAX_BODY_BYTES = 64 * 1024;
+
+const RETRYABLE_REASONS = new Set(['error', 'interrupted', 'aborted']);
+const RETRY_QUESTION_ID = 'session-toolkit-retry';
+const RETRY_OPTION = '重试';
+const ABANDON_OPTION = '放弃';
 
 export const inject = [
   'webServer',
@@ -28,6 +42,7 @@ export const inject = [
   'sessionProjections',
   'sessionQuery',
   'workspaceRegistry',
+  'userQuestions',
 ];
 
 /** A failure that maps to one HTTP status and one stable error code. */
@@ -293,6 +308,114 @@ async function switchPreset(ctx, body) {
   return { agentPreset: preset.id, mode: 'recompose' };
 }
 
+/**
+ * Re-run the last turn's unanswered request without adding anything to the
+ * model-visible surface.
+ *
+ * After a failed or interrupted turn the surface already ends with the user
+ * message that never got an answer (the failed attempt only leaves
+ * non-surface `assistant/attempt` records), so nothing has to be removed. The
+ * driver, however, only starts a turn when a wake arrives with a message, and
+ * a turn whose claimed batch is empty closes immediately. The wake therefore
+ * rides on a message whose source kind is `runtime-context`: the claim loop
+ * admits every claimed message except those to the surface, so the model sees
+ * exactly the request that failed, while the non-empty batch keeps the turn
+ * open. The envelope id must be unique because the inbox refuses duplicates.
+ *
+ * Guards: the session must be live, no turn may be open, and the last
+ * `turn/end` must carry a retryable reason (error / interrupted / aborted).
+ * A `turn/start` seen before any `turn/end` means the scan raced a new turn,
+ * which the turnBoundary guard already rejects, so the loop only needs to
+ * stop early there defensively.
+ */
+async function retryTurn(ctx, body) {
+  const sessionId = requireString(body, 'sessionId');
+  const agent = ctx.agents.get(sessionId);
+  if (agent === undefined) {
+    throw fail(409, 'session-not-live', 'the session is not loaded in the host; open it again and retry');
+  }
+
+  const boundary = ctx.sessionProjections.stateOf(agent.session, 'turnBoundary');
+  if (boundary !== undefined && boundary.openTurnStartSeq !== null && boundary.openTurnStartSeq !== undefined) {
+    throw fail(409, 'session-busy', 'a turn is running in this session; retry when it finishes');
+  }
+
+  const observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' });
+  let end;
+  const events = observation.events;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const type = events[index].type;
+    if (type === 'turn/end') {
+      end = events[index];
+      break;
+    }
+    if (type === 'turn/start') break;
+  }
+  const kind = end?.data?.reason?.kind;
+  if (end === undefined || typeof kind !== 'string' || !RETRYABLE_REASONS.has(kind)) {
+    throw fail(409, 'nothing-to-retry', 'the last turn did not end with a retryable failure');
+  }
+
+  agent.send(
+    {
+      id: `stk-wake-${randomUUID()}`,
+      role: 'user',
+      content: [],
+      source: { kind: 'runtime-context' },
+    },
+    'next-turn',
+    true,
+  );
+  return { ok: true, turn: end.data.turn, reason: kind };
+}
+
+/**
+ * Offer an in-place retry while the failed turn is still open.
+ *
+ * The listener sits downstream of the shipped recoveries (provider retry
+ * budget, compaction on context overflow, image offload) because waterfall
+ * dispatch is outermost-first and each of those delegates when it gives up.
+ * Whatever reaches this point would otherwise close the turn with an error,
+ * so the user is asked through the Host's own question channel: answering
+ * RETRY re-runs the same step without touching the log, anything else
+ * delegates and the ordinary turn error applies.
+ *
+ * Settling is guaranteed even if nobody ever answers: the payload signal
+ * aborts with the turn (including Host disposal) and rejects the ask, and
+ * answerers that cannot serve this agent (a delegated subagent, a missing
+ * provider) reject as well, so both paths fall through to `next()`.
+ */
+function registerRequestRecovery(ctx) {
+  ctx.on('agent/request-error', async (payload, next) => {
+    const { agent, failure, provider, signal } = payload;
+    if (signal.aborted) return next();
+    let answer;
+    try {
+      answer = await ctx.userQuestions.ask({
+        agent,
+        signal,
+        questions: [
+          {
+            id: RETRY_QUESTION_ID,
+            header: '请求失败',
+            question: `模型请求失败（${provider}）。要在本步重试吗？`,
+            detail: typeof failure?.message === 'string' ? failure.message : String(failure?.code ?? ''),
+            options: [
+              { label: RETRY_OPTION, description: '在同一轮同一步重新发起这次请求' },
+              { label: ABANDON_OPTION, description: '结束本轮，保留错误记录' },
+            ],
+          },
+        ],
+      });
+    } catch {
+      return next();
+    }
+    const selected = answer?.answers?.find((item) => item.id === RETRY_QUESTION_ID)?.selected;
+    if (Array.isArray(selected) && selected.includes(RETRY_OPTION)) return { kind: 'retry' };
+    return next();
+  });
+}
+
 export function apply(ctx) {
   const rejected = makeRejection(ctx);
   ctx.effect(
@@ -313,4 +436,14 @@ export function apply(ctx) {
       }),
     `session-toolkit: POST ${PRESET_PATH}`,
   );
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: RETRY_PATH,
+        handler: (req, res) => dispatch(ctx, req, res, rejected, retryTurn),
+      }),
+    `session-toolkit: POST ${RETRY_PATH}`,
+  );
+  registerRequestRecovery(ctx);
 }
