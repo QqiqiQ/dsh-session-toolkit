@@ -18,6 +18,13 @@ From the plugin market (search for "Session Toolkit"), or by hand:
 dsh plugin --profile web add https://github.com/QqiqiQ/dsh-session-toolkit/releases/latest/download/dsh-session-toolkit.tgz
 ```
 
+The same files are on npm as [`@qqiqiq/dsh-session-toolkit`](https://www.npmjs.com/package/@qqiqiq/dsh-session-toolkit)
+— the market entry installs the release tarball, so this is just a second source for the same package:
+
+```powershell
+dsh plugin --profile web add @qqiqiq/dsh-session-toolkit
+```
+
 Then restart `dsh web`.
 
 ## Why a host half is required
